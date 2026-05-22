@@ -66,4 +66,5 @@ def get_video_info(url : str):
             # Если разрешения нет, просто добавляем его
             result_dict[resolution] = data
 
-    return youtube_id, result_dict
+    duration_seconds = info.get('duration')
+    return youtube_id, result_dict, duration_seconds

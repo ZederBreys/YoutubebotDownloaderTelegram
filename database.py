@@ -1,5 +1,31 @@
 from settings import conn_pool
 
+CREATE_CACHE_VIDEO_TABLE = """
+CREATE TABLE IF NOT EXISTS public.cache_video (
+    yt_id VARCHAR(11) NOT NULL,
+    resolution SMALLINT NOT NULL,
+    file_id TEXT NOT NULL,
+    PRIMARY KEY (yt_id, resolution)
+);
+"""
+
+
+def ensure_schema():
+    """Создаёт таблицу cache_video, если её ещё нет в базе."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_CACHE_VIDEO_TABLE)
+        conn.commit()
+        print("[DataBase] Table cache_video is ready.")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DataBase] Failed to ensure schema: {e}")
+        raise
+    finally:
+        release_connection(conn)
+
+
 def get_connection():
     return conn_pool.getconn()
 
@@ -64,3 +90,6 @@ def get_cache_resolution(yt_id, resolution_ids):
         return set()
     finally:
         release_connection(conn)
+
+
+ensure_schema()
