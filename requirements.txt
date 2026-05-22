@@ -1,0 +1,5 @@
+aiogram==2.23.1
+psycopg2==2.9.10
+python-dotenv
+pytube==15.0.0
+yt-dlp
