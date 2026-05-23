@@ -5,11 +5,13 @@ import re
 from random import randint
 
 import yt_dlp
-from aiogram import Bot, Dispatcher, types
-from aiogram.bot.api import TelegramAPIServer
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from aiogram.utils import executor
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command, CommandStart
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
 import database
@@ -36,23 +38,26 @@ load_dotenv()
 
 TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "http://localhost:8081")
 local_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE)
+session = AiohttpSession(api=local_server)
 
-# Initialize bot and dispatcher
-bot = Bot(token=os.getenv('BOT_TOKEN'), server=local_server)
-dp = Dispatcher(bot)
-dp.middleware.setup(LoggingMiddleware())
+# Initialize bot and dispatcher под aiogram 3.x
+bot = Bot(
+    token=os.getenv('BOT_TOKEN'), 
+    session=session,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
+dp = Dispatcher()
 
 
 def _changelog_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup(row_width=3)
-    buttons = []
+    builder = InlineKeyboardBuilder()
     if page > 0:
-        buttons.append(InlineKeyboardButton("◀️", callback_data=f"changelog_page__{page - 1}"))
-    buttons.append(InlineKeyboardButton(f"{page + 1}/{total}", callback_data="changelog_nop"))
+        builder.add(InlineKeyboardButton(text="◀️", callback_data=f"changelog_page__{page - 1}"))
+    builder.add(InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="changelog_nop"))
     if page < total - 1:
-        buttons.append(InlineKeyboardButton("▶️", callback_data=f"changelog_page__{page + 1}"))
-    keyboard.row(*buttons)
-    return keyboard
+        builder.add(InlineKeyboardButton(text="▶️", callback_data=f"changelog_page__{page + 1}"))
+    builder.adjust(3)
+    return builder.as_markup()
 
 
 def _vnote_resolutions(buttons: dict) -> list[str]:
@@ -64,11 +69,13 @@ def _add_extra_format_buttons(
     buttons: dict,
     youtube_id: str,
     duration_seconds: int | None,
-) -> None:
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder.from_markup(keyboard)
+    
     if duration_seconds is not None and duration_seconds <= VNOTE_MAX_SECONDS:
         if _vnote_resolutions(buttons):
-            keyboard.add(
-                InlineKeyboardButton("⭕ Отправь как кружок", callback_data=f"vnote_menu__{youtube_id}")
+            builder.row(
+                InlineKeyboardButton(text="⭕ Отправь как кружок", callback_data=f"vnote_menu__{youtube_id}")
             )
 
     if (
@@ -77,18 +84,18 @@ def _add_extra_format_buttons(
         and "audio" in buttons
     ):
         audio_format_id = buttons["audio"]["format_id"]
-        keyboard.add(
+        builder.row(
             InlineKeyboardButton(
-                "🎤 Отправить как голосовое",
+                text="🎤 Отправить как голосовое",
                 callback_data=f"voice__{audio_format_id}__{youtube_id}",
             )
         )
+    return builder.as_markup()
 
 
-@dp.message_handler(commands=['start'])
+@dp.message(CommandStart())
 async def send_welcome(message: types.Message):
-    await message.bot.send_message(
-        chat_id=message.from_user.id,
+    await message.answer(
         text=(
             "Бот для скачивания видео и аудио с YouTube в любом качестве:\n"
             "- Бесплатно\n"
@@ -96,40 +103,37 @@ async def send_welcome(message: types.Message):
             "<b>Для начала работы просто отправь мне ссылку на видео.</b>\n\n"
             "Доп. информация — /info\n"
             "История обновлений — /changelog"
-        ),
-        parse_mode="HTML",
+        )
     )
 
 
-@dp.message_handler(commands=['info'])
+@dp.message(Command('info'))
 async def send_info(message: types.Message):
-    await message.bot.send_message(
-        chat_id=message.from_user.id,
+    await message.answer(
         text=(
             "<b>Часто задаваемые вопросы:</b>\n\n"
             "<b>Что означает эмодзи ракеты 🚀</b> — Этот значок указывает, что видео уже было "
             "загружено пользователем и сохранено ботом. Поэтому мы можем отправить его вам "
             "мгновенно, без ожидания повторного получения с YouTube и загрузки на сервера Telegram.\n\n"
             "----------------\n\n"
-            "Дата последнего обновления бота: 16.05.2026\n"
+            "Дата последнего обновления бота: 23.05.2026\n"
             "История обновлений: /changelog\n"
             "<b>Разработчик: @ZederBreys</b>"
-        ),
-        parse_mode="HTML",
+        )
     )
 
 
-@dp.message_handler(commands=['changelog'])
+@dp.message(Command('changelog'))
 async def send_changelog(message: types.Message):
     pages = get_changelog_pages()
     if not pages:
         return await message.reply("История обновлений пока недоступна.")
 
     keyboard = _changelog_keyboard(0, len(pages)) if len(pages) > 1 else None
-    await message.reply(pages[0], reply_markup=keyboard, parse_mode="HTML")
+    await message.reply(pages[0], reply_markup=keyboard)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("changelog_page__"))
+@dp.callback_query(F.data.startswith("changelog_page__"))
 async def changelog_page(callback_query: types.CallbackQuery):
     page = int(callback_query.data.split("__")[1])
     pages = get_changelog_pages()
@@ -138,20 +142,21 @@ async def changelog_page(callback_query: types.CallbackQuery):
 
     page = max(0, min(page, len(pages) - 1))
     keyboard = _changelog_keyboard(page, len(pages)) if len(pages) > 1 else None
+    
+    # В aiogram 3 редактируем текст через callback_query.message.edit_text
     await callback_query.message.edit_text(
-        pages[page],
-        reply_markup=keyboard,
-        parse_mode="HTML",
+        text=pages[page],
+        reply_markup=keyboard
     )
     await callback_query.answer()
 
 
-@dp.callback_query_handler(lambda c: c.data == "changelog_nop")
+@dp.callback_query(F.data == "changelog_nop")
 async def changelog_nop(callback_query: types.CallbackQuery):
     await callback_query.answer()
 
 
-@dp.message_handler(regexp='^https?://(?:www\.)?youtube\.com/(?:watch\?v=|embed/|v/|shorts/|playlist\?list=)[\w-]+|^https?://youtu\.be/[\w-]+')
+@dp.message(F.text.regexp(r'^https?://(?:www\.)?youtube\.com/(?:watch\?v=|embed/|v/|shorts/|playlist\?list=)[\w-]+|^https?://youtu\.be/[\w-]+'))
 async def process_youtube_url(message: types.Message):
     url = message.text
 
@@ -166,7 +171,7 @@ async def process_youtube_url(message: types.Message):
         if not data:
             return await temp_msg.edit_text(text="❌ Не удалось получить информацию о видео.")
 
-        keyboard = InlineKeyboardMarkup(row_width=1)
+        builder = InlineKeyboardBuilder()
         youtube_id, buttons, duration_seconds = await asyncio.to_thread(get_video_info, url)
         if str(youtube_id) == "streaming":
             return await temp_msg.edit_text("Ссылки на стримы или плейлисты не обрабатываются.")
@@ -185,22 +190,22 @@ async def process_youtube_url(message: types.Message):
         )
 
         for button in buttons:
+            if button == "audio":
+                continue
             i = buttons[f"{button}"]
             size = float(i['filesize_mb'])
             format_id = i['format_id']
             energy_icon = "🚀" if int(format_id) in available_resolutions else ""
 
             if size > 1800:
-                if button != "audio":
-                    keyboard.add(InlineKeyboardButton(f"❌ {button} - {size:.2f} MB", callback_data="too_large"))
+                builder.row(InlineKeyboardButton(text=f"❌ {button} - {size:.2f} MB", callback_data="too_large"))
             else:
-                if button != "audio":
-                    keyboard.add(
-                        InlineKeyboardButton(
-                            f"{energy_icon}📺 {button} - {size:.2f} MB",
-                            callback_data=f"download__{format_id}__{youtube_id}",
-                        )
+                builder.row(
+                    InlineKeyboardButton(
+                        text=f"{energy_icon}📺 {button} - {size:.2f} MB",
+                        callback_data=f"download__{format_id}__{youtube_id}",
                     )
+                )
 
         if "audio" in buttons:
             audio_info = buttons["audio"]
@@ -209,24 +214,23 @@ async def process_youtube_url(message: types.Message):
             audio_energy_icon = "🚀" if int(audio_format_id) in available_resolutions else ""
 
             if audio_size > 1800:
-                keyboard.add(InlineKeyboardButton(f"❌ audio - {audio_size:.2f} MB", callback_data="too_large"))
+                builder.row(InlineKeyboardButton(text=f"❌ audio - {audio_size:.2f} MB", callback_data="too_large"))
             else:
-                keyboard.add(
+                builder.row(
                     InlineKeyboardButton(
-                        f"{audio_energy_icon}🔊 audio - {audio_size:.2f} MB",
+                        text=f"{audio_energy_icon}🔊 audio - {audio_size:.2f} MB",
                         callback_data=f"audio__{audio_format_id}__{youtube_id}",
                     )
                 )
 
-        _add_extra_format_buttons(keyboard, buttons, youtube_id, duration_seconds)
+        keyboard = builder.as_markup()
+        keyboard = _add_extra_format_buttons(keyboard, buttons, youtube_id, duration_seconds)
 
         await AutoDelTime(temp_msg, 0)
-        await bot.send_photo(
-            message.chat.id,
+        await message.answer_photo(
             photo=data["thumbnail"],
             caption=text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
+            reply_markup=keyboard
         )
     except Exception as e:
         logging.exception("process_youtube_url failed for url=%s", url)
@@ -246,7 +250,7 @@ async def process_youtube_url(message: types.Message):
             await temp_msg.edit_text(text="❌ Ошибка при загрузке видео")
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("vnote_menu__"))
+@dp.callback_query(F.data.startswith("vnote_menu__"))
 async def vnote_quality_menu(callback_query: types.CallbackQuery):
     youtube_id = callback_query.data.split("__")[1]
     url = f"https://www.youtube.com/watch?v={youtube_id}"
@@ -273,27 +277,27 @@ async def vnote_quality_menu(callback_query: types.CallbackQuery):
     if not resolutions:
         return await callback_query.answer("Нет подходящего качества для кружка.", show_alert=True)
 
-    keyboard = InlineKeyboardMarkup(row_width=1)
+    builder = InlineKeyboardBuilder()
     for resolution in resolutions:
         format_id = buttons[resolution]["format_id"]
         size = float(buttons[resolution]["filesize_mb"])
-        keyboard.add(
+        builder.row(
             InlineKeyboardButton(
-                f"📺 {resolution} — {size:.2f} MB",
+                text=f"📺 {resolution} — {size:.2f} MB",
                 callback_data=f"vnote__{format_id}__{youtube_id}",
             )
         )
 
     await callback_query.message.reply(
-        "Выберите качество для отправки кружком (до включительно 720p):",
-        reply_markup=keyboard,
+        text="Выберите качество для отправки кружком (до включительно 720p):",
+        reply_markup=builder.as_markup(),
     )
     await callback_query.answer()
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith('download__'))
+@dp.callback_query(F.data.startswith('download__'))
 async def process_download(callback_query: types.CallbackQuery):
-    temp_msg = await bot.send_message(callback_query.from_user.id, "Скачиваю видео...")
+    temp_msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Скачиваю видео...")
     format_id = callback_query.data.split('__')[1]
     youtube_id = callback_query.data.split('__')[2]
     url = f"https://www.youtube.com/watch?v={youtube_id}"
@@ -319,32 +323,30 @@ async def process_download(callback_query: types.CallbackQuery):
                 e,
                 context=f"handler=process_download\nurl={url}\nformat_id={format_id}",
             )
-            return await temp_msg.edit_text("Не удалось скачать это видео. Попробуйте загрузить другое.")
+            return await temp_msg.edit_text(text="Не удалось скачать это видео. Попробуйте загрузить другое.")
 
-        await temp_msg.edit_text("Отправляю видео..")
+        await temp_msg.edit_text(text="Отправляю видео..")
         if not media_path:
-            return await temp_msg.edit_text("Не удалось подготовить видеофайл для отправки.")
+            return await temp_msg.edit_text(text="Не удалось подготовить видеофайл для отправки.")
 
-        with open(media_path, 'rb') as video_file:
-            data_video = await bot.send_video(
-                chat_id=callback_query.from_user.id,
-                video=InputFile(video_file),
-            )
-            await AutoDelTime(temp_msg, 0)
-            os.remove(media_path)
-            await asyncio.to_thread(
-                database.create_record_if_not_exists,
-                youtube_id,
-                format_id,
-                data_video.video.file_id,
-            )
+        # Использование FSInputFile для отправки файлов по пути
+        data_video = await bot.send_video(
+            chat_id=callback_query.from_user.id,
+            video=FSInputFile(media_path),
+        )
+        await AutoDelTime(temp_msg, 0)
+        safe_remove(media_path)
+        await asyncio.to_thread(
+            database.create_record_if_not_exists,
+            youtube_id,
+            format_id,
+            data_video.video.file_id,
+        )
 
 
-@dp.callback_query_handler(
-    lambda c: c.data.startswith('vnote__') and not c.data.startswith('vnote_menu__')
-)
+@dp.callback_query(lambda c: c.data.startswith('vnote__') and not c.data.startswith('vnote_menu__'))
 async def process_video_note(callback_query: types.CallbackQuery):
-    temp_msg = await bot.send_message(callback_query.from_user.id, "Готовлю кружок...")
+    temp_msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Готовлю кружок...")
     format_id = callback_query.data.split('__')[1]
     youtube_id = callback_query.data.split('__')[2]
     url = f"https://www.youtube.com/watch?v={youtube_id}"
@@ -359,10 +361,10 @@ async def process_video_note(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_video_note\nurl={url}",
         )
-        return await temp_msg.edit_text("Не удалось проверить длительность видео.")
+        return await temp_msg.edit_text(text="Не удалось проверить длительность видео.")
 
     if duration_seconds is not None and duration_seconds > VNOTE_MAX_SECONDS:
-        return await temp_msg.edit_text("Видео длиннее 59 секунд — кружок недоступен.")
+        return await temp_msg.edit_text(text="Видео длиннее 59 секунд — кружок недоступен.")
 
     random_name = randint(1, 9999999)
     ydl_opts = {
@@ -381,25 +383,25 @@ async def process_video_note(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_video_note\nurl={url}\nformat_id={format_id}",
         )
-        return await temp_msg.edit_text("Не удалось подготовить кружок. Попробуйте другое качество.")
+        return await temp_msg.edit_text(text="Не удалось подготовить кружок. Попробуйте другое качество.")
 
     if not media_path:
-        return await temp_msg.edit_text("Не удалось подготовить файл для кружка.")
+        return await temp_msg.edit_text(text="Не удалось подготовить файл для кружка.")
 
     converted_path = None
     try:
-        await bot.send_chat_action(callback_query.from_user.id, "record_video_note")
-        await temp_msg.edit_text("Превращаю видео в кружок...")
+        await bot.send_chat_action(chat_id=callback_query.from_user.id, action="record_video_note")
+        await temp_msg.edit_text(text="Превращаю видео в кружок...")
 
         try:
             converted_path = await asyncio.to_thread(convert_to_video_note, media_path)
         except FFmpegNotFoundError:
             return await temp_msg.edit_text(
-                "Для кружков нужен ffmpeg. Установите его на сервер и добавьте в PATH."
+                text="Для кружков нужен ffmpeg. Установите его на сервер и добавьте в PATH."
             )
         except MediaConvertError:
             return await temp_msg.edit_text(
-                "Не удалось подготовить кружок. Попробуйте другое качество."
+                text="Не удалось подготовить кружок. Попробуйте другое качество."
             )
         finally:
             safe_remove(media_path)
@@ -409,14 +411,13 @@ async def process_video_note(callback_query: types.CallbackQuery):
             VNOTE_MAX_SECONDS,
         )
 
-        await temp_msg.edit_text("Отправляю кружок...")
-        with open(converted_path, "rb") as video_file:
-            await bot.send_video_note(
-                chat_id=callback_query.from_user.id,
-                video_note=InputFile(video_file),
-                duration=final_duration,
-                length=VNOTE_SIZE,
-            )
+        await temp_msg.edit_text(text="Отправляю кружок...")
+        await bot.send_video_note(
+            chat_id=callback_query.from_user.id,
+            video_note=FSInputFile(converted_path),
+            duration=final_duration,
+            length=VNOTE_SIZE,
+        )
     except Exception as e:
         logging.exception("send video note failed for youtube_id=%s", youtube_id)
         await notify_admin_error(
@@ -425,16 +426,16 @@ async def process_video_note(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_video_note send\nurl={url}",
         )
-        await temp_msg.edit_text("Не удалось отправить кружок.")
+        await temp_msg.edit_text(text="Не удалось отправить кружок.")
     finally:
         safe_remove(converted_path)
 
     await AutoDelTime(temp_msg, 0)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith('audio__'))
+@dp.callback_query(F.data.startswith('audio__'))
 async def process_download_audio(callback_query: types.CallbackQuery):
-    temp_msg = await bot.send_message(callback_query.from_user.id, "Скачиваю аудио...")
+    temp_msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Скачиваю аудио...")
     format_id = callback_query.data.split('__')[1]
     youtube_id = callback_query.data.split('__')[2]
     url = f"https://www.youtube.com/watch?v={youtube_id}"
@@ -460,30 +461,29 @@ async def process_download_audio(callback_query: types.CallbackQuery):
                 e,
                 context=f"handler=process_download_audio\nurl={url}\nformat_id={format_id}",
             )
-            return await temp_msg.edit_text("Не удалось скачать это видео. Попробуйте загрузить другое.")
+            return await temp_msg.edit_text(text="Не удалось скачать это видео. Попробуйте загрузить другое.")
 
-        await temp_msg.edit_text("Отправляю аудио..")
+        await temp_msg.edit_text(text="Отправляю аудио..")
         if not media_path:
-            return await temp_msg.edit_text("Не удалось подготовить аудиофайл для отправки.")
+            return await temp_msg.edit_text(text="Не удалось подготовить аудиофайл для отправки.")
 
-        with open(media_path, 'rb') as video_file:
-            data_audio = await bot.send_audio(
-                chat_id=callback_query.from_user.id,
-                audio=InputFile(video_file),
-            )
-            await AutoDelTime(temp_msg, 0)
-            os.remove(media_path)
-            await asyncio.to_thread(
-                database.create_record_if_not_exists,
-                youtube_id,
-                format_id,
-                data_audio.audio.file_id,
-            )
+        data_audio = await bot.send_audio(
+            chat_id=callback_query.from_user.id,
+            audio=FSInputFile(media_path),
+        )
+        await AutoDelTime(temp_msg, 0)
+        safe_remove(media_path)
+        await asyncio.to_thread(
+            database.create_record_if_not_exists,
+            youtube_id,
+            format_id,
+            data_audio.audio.file_id,
+        )
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith('voice__'))
+@dp.callback_query(F.data.startswith('voice__'))
 async def process_voice_message(callback_query: types.CallbackQuery):
-    temp_msg = await bot.send_message(callback_query.from_user.id, "Готовлю голосовое...")
+    temp_msg = await bot.send_message(chat_id=callback_query.from_user.id, text="Готовлю голосовое...")
     format_id = callback_query.data.split('__')[1]
     youtube_id = callback_query.data.split('__')[2]
     url = f"https://www.youtube.com/watch?v={youtube_id}"
@@ -498,12 +498,12 @@ async def process_voice_message(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_voice_message\nurl={url}",
         )
-        return await temp_msg.edit_text("Не удалось проверить длительность видео.")
+        return await temp_msg.edit_text(text="Не удалось проверить длительность видео.")
 
     duration_seconds = data.get("duration_seconds") if data else None
     if duration_seconds is not None and duration_seconds > VOICE_MAX_SECONDS:
         return await temp_msg.edit_text(
-            "Видео длиннее 9 минут 55 секунд — голосовое сообщение недоступно."
+            text="Видео длиннее 9 минут 55 секунд — голосовое сообщение недоступно."
         )
 
     random_name = randint(1, 9999999)
@@ -522,17 +522,17 @@ async def process_voice_message(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_voice_message\nurl={url}\nformat_id={format_id}",
         )
-        return await temp_msg.edit_text("Не удалось подготовить голосовое сообщение.")
+        return await temp_msg.edit_text(text="Не удалось подготовить голосовое сообщение.")
 
     if not media_path:
         media_path = find_file_by_name("./downloads/", str(random_name))
     if not media_path:
-        return await temp_msg.edit_text("Не удалось подготовить аудиофайл.")
+        return await temp_msg.edit_text(text="Не удалось подготовить аудиофайл.")
 
     converted_path = None
     try:
-        await bot.send_chat_action(callback_query.from_user.id, "record_voice")
-        await temp_msg.edit_text("Конвертирую голосовое...")
+        await bot.send_chat_action(chat_id=callback_query.from_user.id, action="record_voice")
+        await temp_msg.edit_text(text="Конвертирую голосовое...")
 
         try:
             converted_path = await asyncio.to_thread(
@@ -542,10 +542,10 @@ async def process_voice_message(callback_query: types.CallbackQuery):
             )
         except FFmpegNotFoundError:
             return await temp_msg.edit_text(
-                "Для голосовых нужен ffmpeg. Установите его на сервер и добавьте в PATH."
+                text="Для голосовых нужен ffmpeg. Установите его на сервер и добавьте в PATH."
             )
         except MediaConvertError:
-            return await temp_msg.edit_text("Не удалось подготовить голосовое сообщение.")
+            return await temp_msg.edit_text(text="Не удалось подготовить голосовое сообщение.")
         finally:
             safe_remove(media_path)
 
@@ -553,13 +553,12 @@ async def process_voice_message(callback_query: types.CallbackQuery):
         if voice_duration is not None:
             voice_duration = min(voice_duration, VOICE_MAX_SECONDS)
 
-        await temp_msg.edit_text("Отправляю голосовое...")
-        with open(converted_path, "rb") as audio_file:
-            await bot.send_voice(
-                chat_id=callback_query.from_user.id,
-                voice=InputFile(audio_file),
-                duration=voice_duration,
-            )
+        await temp_msg.edit_text(text="Отправляю голосовое...")
+        await bot.send_voice(
+            chat_id=callback_query.from_user.id,
+            voice=FSInputFile(converted_path),
+            duration=voice_duration,
+        )
     except Exception as e:
         logging.exception("send voice failed for youtube_id=%s", youtube_id)
         await notify_admin_error(
@@ -568,23 +567,26 @@ async def process_voice_message(callback_query: types.CallbackQuery):
             e,
             context=f"handler=process_voice_message send\nurl={url}",
         )
-        await temp_msg.edit_text("Не удалось отправить голосовое сообщение.")
+        await temp_msg.edit_text(text="Не удалось отправить голосовое сообщение.")
     finally:
         safe_remove(converted_path)
 
     await AutoDelTime(temp_msg, 0)
 
 
-@dp.callback_query_handler(lambda c: c.data == 'too_large')
+@dp.callback_query(F.data == 'too_large')
 async def process_too_large(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(
-        callback_query.id,
+    await callback_query.answer(
         text="Файл слишком большой для отправки через Telegram",
     )
 
 
-@dp.errors_handler()
-async def global_errors_handler(update: types.Update, exception: Exception):
+# В aiogram 3 ошибки перехватываются через dp.errors.register или декоратор dp.errors()
+@dp.errors()
+async def global_errors_handler(exception_wrapper: types.ErrorEvent):
+    update = exception_wrapper.update
+    exception = exception_wrapper.exception
+    
     logging.exception("Unhandled error in update=%s", update)
     user_id = None
     if update.message:
@@ -612,5 +614,14 @@ def _download_with_yt_dlp(ydl_opts: dict, url: str) -> None:
         ydl.download([url])
 
 
+# Асинхронная точка входа для aiogram 3.x
+async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot stopped!")
