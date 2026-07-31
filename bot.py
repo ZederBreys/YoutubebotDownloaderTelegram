@@ -195,7 +195,7 @@ async def process_youtube_url(message: types.Message):
             i = buttons[f"{button}"]
             size = float(i['filesize_mb'])
             format_id = i['format_id']
-            energy_icon = "🚀" if int(format_id) in available_resolutions else ""
+            energy_icon = "🚀" if format_id in available_resolutions else ""
 
             if size > 1800:
                 builder.row(InlineKeyboardButton(text=f"❌ {button} - {size:.2f} MB", callback_data="too_large"))
@@ -211,7 +211,7 @@ async def process_youtube_url(message: types.Message):
             audio_info = buttons["audio"]
             audio_size = float(audio_info['filesize_mb'])
             audio_format_id = audio_info['format_id']
-            audio_energy_icon = "🚀" if int(audio_format_id) in available_resolutions else ""
+            audio_energy_icon = "🚀" if audio_format_id in available_resolutions else ""
 
             if audio_size > 1800:
                 builder.row(InlineKeyboardButton(text=f"❌ audio - {audio_size:.2f} MB", callback_data="too_large"))
