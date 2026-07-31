@@ -26,7 +26,7 @@ DB_CONFIG = {
     'dbname': os.getenv('DB_NAME', 'yt_download'),
     'user': os.getenv('DB_USER'),
     'password': os.getenv('DB_PASSWORD'),
-    'host': os.getenv('DB_HOST', 'localhost'),
+    'host': os.getenv('DB_HOST', '127.0.0.1'),
     'port': os.getenv('DB_PORT', '5432')
 }
 

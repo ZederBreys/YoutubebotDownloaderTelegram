@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 
-TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "http://localhost:8081")
+TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "http://127.0.0.1:8081")
 local_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE)
 session = AiohttpSession(api=local_server)
 
